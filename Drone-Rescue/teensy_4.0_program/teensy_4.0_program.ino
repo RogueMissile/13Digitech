@@ -1,70 +1,34 @@
-// Import librays
+#include <PID_v1.h>
 #include <sbus.h>
-#include <Servo.h>
+#include <Arduino.h>
 
-//***********************************************************************************************//
+bfs::SbusRx sbus_rx(&Serial1);   // Receiver on Serial1 rx
+bfs::SbusTx sbus_tx(&Serial1);   // Flight controller on Serial1 tx
 
-// Toggle Serial Printing Of Data For Debugging (Uncomment to Enable)
-
-// PWM values from RX
-// #define PWM_IN_VALUES
-
-//***********************************************************************************************//
-
-// Defines
-
-// Define # of RX PWM outputs (servos/motors) Max outputs for r81 v2 is 8
-const int noPWMRX = 6;
-Servo servos[noPWMRX];
-
-// Define SBUS RX (Pin 0 for SBUS RX on Teensy 4.0)
-bfs::SbusRx sbusRx(&Serial1, true);
-bfs::SbusData sbusData;
-
-//***********************************************************************************************//
+const uint32_t SBUS_INTERVAL_US = 9000; // Approx. 111Hz transmission
+elapsedMicros sbus_timer;               // Microsecond counter
 
 void setup() {
-    SerialUSB.begin(115200); // Debug Serial Monitor
-    Serial1.begin(100000, SERIAL_8E2); // SBUS Serial in
-    sbusRx.Begin();
-
-    pinMode(13, OUTPUT);
-    digitalWrite(13, HIGH); // Turn on Teensy 4.0 LED
-
-    // Attach servos to pins
-    for (int i = 0; i < noPWMRX; i++) {
-        servos[i].attach(i + 1);
-    }
-
-    SerialUSB.println("SBUS to PWM initialized!");
+  
+  // Initilise serial communications with Receiver and Flight Controller
+  Serial1.begin(100000); 
+  sbus_rx.Begin();
+  sbus_tx.Begin();
 }
 
-//***********************************************************************************************//
-
 void loop() {
-    if (sbusRx.Read()) { // Process SBUS data
-        sbusData = sbusRx.data();
+  if (sbus_rx.Read()) {
+    // Get incoming SBUS data
+    bfs::SbusData sbusData = sbus_rx.data();
 
-        #ifdef PWM_IN_VALUES
-            SerialUSB.print("PWM Outputs: ");
-        #endif
+    // Modify SBUS data
+    // sbusData.ch[0] = 1500;
 
-        for (int i = 0; i < noPWMRX; i++) { // Limit to only used channels
-            int pwmValue = map(sbusData.ch[i], 172, 1811, 1000, 2000); // Convert SBUS to PWM
-            servos[i].writeMicroseconds(pwmValue); // Send PWM signal to servos
-
-            #ifdef PWM_IN_VALUES
-                SerialUSB.print(pwmValue); // Print PWM value
-                SerialUSB.print(" ");
-            #endif
-        }
-
-        #ifdef PWM_IN_VALUES
-            SerialUSB.println();
-        #endif
-
-        digitalWrite(13, !digitalRead(13)); // Blink LED to show data updates (Blink speed depends on update rate below)
+    // Transmit SBUS data at controlled intervals
+    if (sbus_timer > SBUS_INTERVAL_US) {
+      sbus_tx.data(sbusData);
+      sbus_tx.Write();
+      sbus_timer = 0;
     }
-
-    delay(1); // Update rate (ms)
+  }
 }
