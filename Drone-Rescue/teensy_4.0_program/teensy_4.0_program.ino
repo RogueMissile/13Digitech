@@ -17,40 +17,56 @@ TinyGPSPlus gps; // Create GPS object
 
 QMC5883LCompass compass;
 int referenceHeading = 0;
-bool headfreeResetDone = false;
 
-// PID variables
+// Altitude PID variables
 double currentAltitude = 0;
 double targetAltitude = 0;
 double pidOutput = 0;
-double throttleInput = 0;
+
+// Position PID variables
+double currentLatitude = 0;
+double currentLongitude = 0;
+double storedLatitude = 0;
+double storedLongitude = 0;
+double targetLatitude = 0;
+double targetLongitude = 0;
+double latitudeOutput = 0;
+double longitudeOutput = 0;
 
 // PID objects
 PID altitudePID(&currentAltitude, &pidOutput, &targetAltitude, 18.0, 0.5, 1.0, DIRECT);
+PID latitudePID(&currentLatitude, &latitudeOutput, &targetLatitude, 1.0, 0.002, 1.0, DIRECT);
+PID longitudePID(&currentLongitude, &longitudeOutput, &targetLongitude, 1.0, 0.002, 1.0, DIRECT);
 
-// Altitude hold state flags
+// State flags
 bool altitudeHoldActive = false;
-bool altitudeBoosted = false;
+bool positionHoldActive = false;
+bool destinationGoToActive = false;
 
 // Hover throttle value
 const int hoverThrottle = 691;
 
 void setup() {
-  SerialUSB.begin(115200); // Initilise connecton with serial moniter
-
-  Serial1.begin(100000); // Initilise SBUS connecton 
+  SerialUSB.begin(115200); // Serial monitor
+  Serial1.begin(100000);   // SBUS
   sbus_rx.Begin();
   sbus_tx.Begin();
 
-  Serial5.begin(115200); // Initilise GPS connection
+  Serial5.begin(115200);   // GPS
 
   compass.init();
-	compass.setCalibrationOffsets(-22.00, -369.00, 495.00);
+  compass.setCalibrationOffsets(-22.00, -369.00, 495.00);
   compass.setCalibrationScales(0.98, 0.93, 1.11);
-	compass.setMode(0x01, 0x0C, 0x10, 0x00);
+  compass.setMode(0x01, 0x0C, 0x10, 0x00);
 
   altitudePID.SetMode(AUTOMATIC);
   altitudePID.SetOutputLimits(-600, 600); // Altitude PID limits
+
+  latitudePID.SetMode(AUTOMATIC);
+  latitudePID.SetOutputLimits(-500, 500); // Latitude PID limits
+
+  longitudePID.SetMode(AUTOMATIC);
+  longitudePID.SetOutputLimits(-500, 500); // Longitude PID limits
 }
 
 void loop() {
@@ -59,6 +75,8 @@ void loop() {
   }
 
   if (gps.location.isValid()) {
+    currentLatitude = gps.location.lat()*1000000;
+    currentLongitude = gps.location.lng()*1000000;
     currentAltitude = gps.altitude.meters();
   }
 
@@ -73,53 +91,81 @@ void loop() {
     int ch6 = sbusData.ch[5]; // Channel 6 (Flight Mode) 
     int ch7 = sbusData.ch[6]; // Channel 7 (Aux 1) 
     int ch8 = sbusData.ch[7]; // Channel 8 (Aux 2)
-    
+
     compass.read();
-    int heading = compass.getAzimuth();
-    heading -= 30;
-    
+    int heading = compass.getAzimuth() - 30;
+
+    sbusData.ch[7] = 1811;
 
     // Override CH7 when heading is north
-    if (heading <= 5 && heading >= -5) {
-      sbusData.ch[6] = 172;
+    if (heading <= 5 && heading >= -5 && ch8 <= 1500) {
+      sbusData.ch[7] = 172;
       SerialUSB.println("Heading is North — CH7 set to 172");
+
+      if (gps.location.isValid()) {
+        storedLatitude = gps.location.lat()*1000000;
+        storedLongitude = gps.location.lng()*1000000;
+      }
     }
 
-
-    if (ch6 < 1200) {
+    /*if (ch6 < 1200) {
+      // ALTITUDE HOLD
       if (!altitudeHoldActive) {
-        targetAltitude = currentAltitude;
+        targetAltitude = currentAltitude + 5;
         altitudeHoldActive = true;
-        altitudeBoosted = false;
-      }
-
-      // CH6 < 1200 → Boost altitude
-      if (ch6 < 500 && !altitudeBoosted) {
-        targetAltitude += 5.0;
-        altitudeBoosted = true;
-      }
-
-      // CH6 > 1200 → Revert boost
-      if (ch6 > 500 && altitudeBoosted) {
-        targetAltitude -= 5.0;
-        altitudeBoosted = false;
       }
 
       altitudePID.Compute();
-
       int adjustedThrottle = constrain(hoverThrottle + pidOutput, 172, 1811);
       sbusData.ch[2] = adjustedThrottle;
-
     } else {
       altitudeHoldActive = false;
-      altitudeBoosted = false;
+    }*/
+
+    // POSITION HOLD
+    if (ch6 < 1200 && ch6 > 500) {
+      if (!positionHoldActive) {
+        targetLatitude = currentLatitude;
+        targetLongitude = currentLongitude;
+        positionHoldActive = true;
+      }
+
+      latitudePID.Compute();
+      longitudePID.Compute();
+
+      sbusData.ch[1] = constrain(992 - latitudeOutput, 172, 1811); // Pitch (Latitude)
+      sbusData.ch[0] = constrain(992 - longitudeOutput, 172, 1811); // Roll (Longitude)
+
+    } else if (ch6 < 500) {
+      if (!destinationGoToActive) {
+        targetLatitude = storedLatitude;
+        targetLongitude = storedLongitude;
+        destinationGoToActive = true;
+      }
+
+      latitudePID.Compute();
+      longitudePID.Compute();
+
+      sbusData.ch[1] = constrain(992 - latitudeOutput, 172, 1811); // Pitch (Latitude)
+      sbusData.ch[0] = constrain(992 - longitudeOutput, 172, 1811); // Roll (Longitude)
+
+    } else {
+      positionHoldActive = false;
+      destinationGoToActive = false;
     }
 
-    // Print target altitude
-      SerialUSB.println("targetAltitude");
-      SerialUSB.println(targetAltitude);
+
+    // Debug output
+    SerialUSB.print("Pitch Out: "); SerialUSB.println(sbusData.ch[1]);
+    SerialUSB.print("Roll Out: "); SerialUSB.println(sbusData.ch[0]);
+    SerialUSB.print("Target Altitude: "); SerialUSB.println(targetAltitude);
+    SerialUSB.print("Target Latitude: "); SerialUSB.println(targetLatitude, 6);
+    SerialUSB.print("Target Longitude: "); SerialUSB.println(targetLongitude, 6);
+    SerialUSB.print("Current Latitude: "); SerialUSB.println(currentLatitude, 6);
+    SerialUSB.print("Current Longitude: "); SerialUSB.println(currentLongitude, 6);
+    SerialUSB.print("Sats: "); SerialUSB.println(gps.satellites.value());
+
     if (sbus_timer > SBUS_INTERVAL_US) {
-      
       sbus_tx.data(sbusData);
       sbus_tx.Write();
       sbus_timer = 0;
